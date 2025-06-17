@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <!-- Configuración del encabezado del documento HTML -->
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="style.css">
+    <title>Tetris MIDI Reproducer</title>
+    <!-- Estilos CSS para el diseño de la interfaz -->
+    <style>
+        body { margin: 0; font-family: Arial, sans-serif; }
+        .container { display: flex; padding: 10px; }
+        #gameCanvas { border: 1px solid #000; width: 400px; height: 600px; }
+        #previewCanvas { border: 1px solid #000; width: 100px; height: 100px; margin-left: 10px; }
+        .controls { margin-left: 10px; }
+        button { margin: 5px 0; padding: 5px 10px; }
+        select { margin: 5px 0; padding: 5px; }
+        #noteDisplay { margin-top: 10px; font-size: 18px; color: #000; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <!-- Contenedor principal con lienzo del juego y controles -->
+    <div class="container">
+        <canvas id="gameCanvas"></canvas>
+        <div>
+            <canvas id="previewCanvas"></canvas>
+            <div class="controls">
+                <!-- Selector de instrumento y botones de control -->
+                <select id="instrumentSelect">
+                    <option value="0">Piano</option>
+                    <option value="1">Órgano</option>
+                    <option value="2">Sintetizador</option>
+                </select>
+                <button id="startButton">Iniciar</button>
+                <button id="endButton" disabled>Finalizar</button>
+            </div>
+            <div id="noteDisplay">Nota actual: -</div>
+        </div>
+    </div>
+    <script>
+        // Establecimiento de la conexión WebSocket con el servidor MIDI
+        const ws = new WebSocket('ws://localhost:3001');
+
+        // Función para verificar si la conexión WebSocket está abierta
+        function isOpen(ws) { return ws.readyState === ws.OPEN; }
+
+        // Evento al abrir la conexión WebSocket
+        ws.addEventListener('open', () => {
+            console.log('Conexión WebSocket establecida');
+        });
+
+        // Manejo de errores en la conexión WebSocket
+        ws.addEventListener('error', (error) => {
+            console.error('Error WebSocket:', error);
+        });
+
+        // Manejo de mensajes recibidos del servidor
+        ws.addEventListener('message', (event) => {
+            console.log(`Mensaje del servidor: ${event.data}`);
+        });
+
+        // Configuración inicial de los lienzos y variables del juego
+        const gameCanvas = document.getElementById('gameCanvas');
+        const previewCanvas = document.getElementById('previewCanvas');
+        const noteDisplay = document.getElementById('noteDisplay');
+        gameCanvas.width = 400;
+        gameCanvas.height = 600;
+        previewCanvas.width = 100;
+        previewCanvas.height = 100;
+        const ctx = gameCanvas.getContext('2d');
+        const previewCtx = previewCanvas.getContext('2d');
+        const gridSize = 20;
+        const cols = Math.floor(gameCanvas.width / gridSize);
+        const rows = Math.floor(gameCanvas.height / gridSize);
+        let grid = Array(rows).fill().map(() => Array(cols).fill(0));
+        let lockedPieces = [];
+
+        // Definiciones de las formas de las piezas de Tetris
+        const pieceTypes = [
+            [[1, 1], [1, 1]], // Cuadrado
+            [[1, 0], [1, 0], [1, 1]], // Forma L
+            [[0, 1, 0], [1, 1, 1]], // Forma T
+            [[1], [1], [1], [1]] // Forma I
+        ];
+
+        const colors = ['#00FFFF', '#FF00FF', '#FFFF00', '#00FF00'];
+
+        // Clase para manejar las piezas de Tetris
+        class TetrisPiece {
+            constructor() {
+                this.type = JSON.parse(JSON.stringify(pieceTypes[Math.floor(Math.random() * pieceTypes.length)]));
+                this.color = colors[Math.floor(Math.random() * colors.length)];
+                this.x = Math.floor((cols - this.type[0].length) / 2);
+                this.y = 0;
+                this.vy = 0.5;
+                this.blockSize = gridSize;
+                this.instrument = parseInt(document.getElementById('instrumentSelect').value);
+            }
+
+            // Dibuja la pieza en el lienzo
+            draw(ctx) {
+                ctx.fillStyle = this.color;
+                for (let row = 0; row < this.type.length; row++) {
+                    for (let col = 0; col < this.type[row].length; col++) {
+                        if (this.type[row][col]) {
+                            ctx.fillRect(
+                                (this.x + col) * this.blockSize,
+                                (this.y + row) * this.blockSize,
+                                this.blockSize - 2,
+                                this.blockSize - 2
+                            );
+                        }
+                    }
+                }
+            }
+
+            // Rota la pieza y envía una nota MIDI
+            rotate() {
+                const len = this.type.length;
+                const newType = Array(len).fill().map(() => Array(len).fill(0));
+                for (let i = 0; i < len; i++) {
+                    for (let j = 0; j < len; j++) {
+                        newType[j][len - 1 - i] = this.type[i][j];
+                    }
+                }
+                const originalX = this.x;
+                this.type = newType;
+                if (this.x + this.type[0].length > cols) this.x = cols - this.type[0].length;
+                if (this.collides()) {
+                    this.type = JSON.parse(JSON.stringify(pieceTypes[Math.floor(Math.random() * pieceTypes.length)]));
+                    this.x = Math.floor((cols - this.type[0].length) / 2);
+                    this.y = 0;
+                }
+                sendMidiNote(65, 100); // Fa al rotar
+                sendMidiCC();
+            }
+
+            // Mueve la pieza horizontalmente y envía una nota MIDI
+            move(dx) {
+                this.x += dx;
+                if (this.x < 0) this.x = 0;
+                if (this.x + this.type[0].length > cols) this.x = cols - this.type[0].length;
+                if (this.collides()) this.x -= dx;
+                const note = dx === -1 ? 60 : 63; // Do (60) a la izquierda, Mi bemol (63) a la derecha
+                sendMidiNote(note, 100); // Nota al mover
+                sendMidiCC();
+            }
+
+            // Actualiza la posición vertical de la pieza y reproduce nota al caer
+            update() {
+                this.y += this.vy;
+                const pentatonicNotes = [60, 63, 65, 66, 68]; // Do, Mi bemol, Fa, Sol bemol, La bemol
+                const noteNames = ['Do', 'Mi bemol', 'Fa', 'Sol bemol', 'La bemol'];
+                const fallNote = pentatonicNotes[Math.floor((this.y / rows) * pentatonicNotes.length) % pentatonicNotes.length];
+                sendMidiNote(fallNote, 80); // Nota más suave mientras cae
+                noteDisplay.textContent = `Nota actual: ${noteNames[pentatonicNotes.indexOf(fallNote)]}`; // Mostrar nombre
+                if (this.collides()) {
+                    this.y = Math.floor(this.y);
+                    return false;
+                }
+                return true;
+            }
+
+            // Bloquea la pieza en la cuadrícula y reproduce notas al caer
+            lock() {
+                let noteCount = 0;
+                for (let row = 0; row < this.type.length; row++) {
+                    for (let col = 0; col < this.type[row].length; col++) {
+                        if (this.type[row][col]) {
+                            const gridY = Math.floor(this.y) + row;
+                            const gridX = this.x + col;
+                            if (gridY >= 0 && gridY < rows && gridX >= 0 && gridX < cols) {
+                                grid[gridY][gridX] = 1;
+                                noteCount++;
+                            }
+                        }
+                    }
+                }
+                const noteMap = [
+                    { range: [1, 2], note: 60, name: 'Do' },      // Do
+                    { range: [3, 4], note: 63, name: 'Mi bemol' }, // Mi bemol
+                    { range: [5, 6], note: 65, name: 'Fa' },       // Fa
+                    { range: [7, 8], note: 66, name: 'Sol bemol' },// Sol bemol
+                    { range: [9, 10], note: 68, name: 'La bemol' },// La bemol
+                    { range: [11, 12], note: 60, name: 'Do' },     // Vuelve a Do
+                    { range: [13, 14], note: 63, name: 'Mi bemol' },// Mi bemol
+                    { range: [15, 16], note: 65, name: 'Fa' }      // Fa
+                ];
+                const range = noteMap.find(r => noteCount >= r.range[0] && noteCount <= r.range[1]);
+                if (range) {
+                    sendMidiNote(range.note, 100); // Nota principal al caer
+                    const additionalNotes = [63, 65, 66, 68].filter(n => n > range.note).slice(0, Math.min(noteCount, 3));
+                    additionalNotes.forEach(note => sendMidiNote(note, 100));
+                    noteDisplay.textContent = `Nota al caer: ${range.name}`; // Mostrar nombre al caer
+                }
+                lockedPieces.push({ type: this.type, color: this.color, instrument: this.instrument, x: this.x, y: this.y });
+                return new TetrisPiece();
+            }
+
+            // Verifica si la pieza colisiona con el suelo o piezas bloqueadas
+            collides() {
+                for (let row = 0; row < this.type.length; row++) {
+                    for (let col = 0; col < this.type[row].length; col++) {
+                        if (this.type[row][col]) {
+                            const newY = Math.floor(this.y) + row + 1;
+                            const newX = this.x + col;
+                            if (newY >= rows || (newY >= 0 && newX >= 0 && newX < cols && grid[newY][newX])) {
+                                return true;
+                            }
+                        }
+                    }
+                }
+                return false;
+            }
+        }
+
+        let currentPiece = new TetrisPiece();
+        let nextPiece = new TetrisPiece();
+        let lastTime = performance.now();
+        const dropInterval = 500;
+        let isRunning = false;
+
+        // Dibuja la cuadrícula del juego
+        function drawGrid() {
+            ctx.strokeStyle = '#333';
+            for (let i = 0; i <= cols; i++) {
+                ctx.beginPath();
+                ctx.moveTo(i * gridSize, 0);
+                ctx.lineTo(i * gridSize, gameCanvas.height);
+                ctx.stroke();
+            }
+            for (let i = 0; i <= rows; i++) {
+                ctx.beginPath();
+                ctx.moveTo(0, i * gridSize);
+                ctx.lineTo(gameCanvas.width, i * gridSize);
+                ctx.stroke();
+            }
+        }
+
+        // Dibuja las piezas bloqueadas en la cuadrícula
+        function drawLockedPieces() {
+            for (let row = 0; row < rows; row++) {
+                for (let col = 0; col < cols; col++) {
+                    if (grid[row][col]) {
+                        ctx.fillStyle = '#666';
+                        ctx.fillRect(col * gridSize, row * gridSize, gridSize - 2, gridSize - 2);
+                    }
+                }
+            }
+        }
+
+        // Dibuja la vista previa de la próxima pieza
+        function drawPreview() {
+            previewCtx.clearRect(0, 0, previewCanvas.width, previewCanvas.height);
+            const scale = previewCanvas.width / (nextPiece.type[0].length * gridSize);
+            previewCtx.fillStyle = nextPiece.color;
+            for (let row = 0; row < nextPiece.type.length; row++) {
+                for (let col = 0; col < nextPiece.type[row].length; col++) {
+                    if (nextPiece.type[row][col]) {
+                        previewCtx.fillRect(
+                            col * gridSize * scale,
+                            row * gridSize * scale,
+                            gridSize * scale - 2,
+                            gridSize * scale - 2
+                        );
+                    }
+                }
+            }
+        }
+
+        // Maneja las teclas de control del juego
+        function handleKeys(event) {
+            if (!isRunning) return;
+            switch (event.key) {
+                case 'ArrowLeft':
+                    currentPiece.move(-1);
+                    break;
+                case 'ArrowRight':
+                    currentPiece.move(1);
+                    break;
+                case 'ArrowUp':
+                    currentPiece.rotate();
+                    break;
+                case 'ArrowDown':
+                    while (!currentPiece.collides() && currentPiece.y < rows - currentPiece.type.length) {
+                        currentPiece.y += 1;
+                    }
+                    currentPiece.y -= 1;
+                    break;
+            }
+            sendMidiCC();
+        }
+
+        document.addEventListener('keydown', handleKeys);
+        // Detiene las notas al soltar las teclas
+        document.addEventListener('keyup', () => {
+            sendMidiNote(0, 0); // Note Off genérico
+        });
+
+        // Convierte la posición X en un valor de control MIDI
+        function getTranslatedValueCutOff(value) {
+            return Math.round((value / gameCanvas.width) * 127);
+        }
+
+        // Convierte la posición Y en un valor de control MIDI
+        function getTranslatedValueResonance(value) {
+            return Math.round((value / gameCanvas.height) * 127);
+        }
+
+        // Envía mensajes de control continuo (CC) a través de WebSocket
+        function sendMidiCC() {
+            const cutOffValue = getTranslatedValueCutOff(currentPiece.x * gridSize);
+            const resonanceValue = getTranslatedValueResonance(currentPiece.y * gridSize);
+            if (!isNaN(cutOffValue) && cutOffValue >= 0 && cutOffValue <= 127) {
+                const ccNumber = 74;
+                const ccValue = Math.min(127, Math.max(0, cutOffValue));
+                const ccMessage = JSON.stringify({ ccNumber, ccValue });
+                if (isOpen(ws)) ws.send(ccMessage);
+                console.log(`Enviando CC ${ccNumber} con valor ${ccValue}`);
+            }
+            if (!isNaN(resonanceValue) && resonanceValue >= 0 && resonanceValue <= 127) {
+                const ccNumber = 42;
+                const ccValue = Math.min(127, Math.max(0, resonanceValue));
+                const ccMessage = JSON.stringify({ ccNumber, ccValue });
+                if (isOpen(ws)) ws.send(ccMessage);
+                console.log(`Enviando CC ${ccNumber} con valor ${ccValue}`);
+            }
+        }
+
+        // Envía notas MIDI a través de WebSocket
+        function sendMidiNote(note, velocity) {
+            if (!isNaN(note) && note >= 0 && note <= 127 && velocity >= 0 && velocity <= 127) {
+                const noteOnMessage = JSON.stringify({ ccNumber: 144, ccValue: note, value: velocity });
+                const noteOffMessage = JSON.stringify({ ccNumber: 128, ccValue: note, value: 0 });
+                if (isOpen(ws)) {
+                    ws.send(noteOnMessage);
+                    console.log(`Enviando Nota On: ${note} con velocidad ${velocity}`);
+                    setTimeout(() => {
+                        if (isOpen(ws)) ws.send(noteOffMessage);
+                        console.log(`Enviando Nota Off: ${note}`);
+                    }, 200);
+                }
+            }
+        }
+
+        // Envía cambio de programa (instrumento) a través de WebSocket
+        function sendProgramChange(instrument) {
+            const pcMessage = JSON.stringify({ ccNumber: 192, ccValue: instrument, value: 0 });
+            if (isOpen(ws)) ws.send(pcMessage);
+            console.log(`Enviando Cambio de Programa a instrumento ${instrument}`);
+        }
+
+        // Maneja el cambio de instrumento en el selector
+        document.getElementById('instrumentSelect').addEventListener('change', (e) => {
+            currentPiece.instrument = parseInt(e.target.value);
+            sendProgramChange(currentPiece.instrument);
+        });
+
+        // Inicia el juego al presionar el botón "Iniciar"
+        document.getElementById('startButton').addEventListener('click', () => {
+            isRunning = true;
+            document.getElementById('startButton').disabled = true;
+            document.getElementById('endButton').disabled = false;
+        });
+
+        // Finaliza el juego y reproduce piezas bloqueadas al presionar "Finalizar"
+        document.getElementById('endButton').addEventListener('click', () => {
+            isRunning = false;
+            document.getElementById('startButton').disabled = false;
+            document.getElementById('endButton').disabled = true;
+            playLockedPieces();
+        });
+
+        // Reproduce las notas de las piezas bloqueadas
+        function playLockedPieces() {
+            console.log('Reproduciendo piezas bloqueadas');
+            lockedPieces.forEach((piece, index) => {
+                setTimeout(() => {
+                    sendProgramChange(piece.instrument);
+                    const pentatonicNotes = [60, 63, 65, 66, 68];
+                    sendMidiNote(pentatonicNotes[index % 5], 100); // Usar pentatónica
+                }, index * 500); // 500ms de retraso entre piezas
+            });
+        }
+
+        // Bucle de animación principal del juego
+        function animate(time) {
+            requestAnimationFrame(animate);
+            ctx.clearRect(0, 0, gameCanvas.width, gameCanvas.height);
+            previewCtx.clearRect(0, 0, previewCanvas.width, previewCanvas.height);
+
+            if (isRunning && time - lastTime > dropInterval) {
+                if (!currentPiece.update()) {
+                    const newPiece = currentPiece.lock();
+                    currentPiece = newPiece;
+                    nextPiece = new TetrisPiece();
+                }
+                lastTime = time;
+            }
+
+            drawGrid();
+            drawLockedPieces();
+            currentPiece.draw(ctx);
+            drawPreview();
+        }
+
+        // Inicia la animación
+        animate(performance.now());
+    </script>
+</body>
+</html>
