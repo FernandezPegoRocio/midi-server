@@ -27,9 +27,39 @@
             <div class="controls">
                 <!-- Selector de instrumento y botones de control -->
                 <select id="instrumentSelect">
-                    <option value="0">Piano</option>
-                    <option value="1">Órgano</option>
-                    <option value="2">Sintetizador</option>
+                    <option value="0">0</option>
+                    <option value="1">1</option>
+                    <option value="2">2</option>
+                    <option value="3">3</option>
+                    <option value="4">4</option>
+                    <option value="5">5</option>
+                    <option value="6">6</option>
+                    <option value="7">7</option>
+                    <option value="8">8</option>
+                    <option value="9">9</option>
+                    <option value="10">10</option>
+                    <option value="11">11</option>
+                    <option value="12">12</option>
+                    <option value="13">13</option>
+                    <option value="14">14</option>
+                    <option value="15">15</option>
+                    <option value="16">16</option>
+                    <option value="17">17</option>
+                    <option value="18">18</option>
+                    <option value="19">19</option>
+                    <option value="20">20</option>
+                    <option value="21">21</option>
+                    <option value="22">22</option>
+                    <option value="23">23</option>
+                    <option value="24">24</option>
+                    <option value="25">25</option>
+                    <option value="26">26</option>
+                    <option value="27">27</option>
+                    <option value="28">28</option>
+                    <option value="29">29</option>
+                    <option value="30">30</option>
+                    <option value="31">31</option>
+                    <option value="32">32</option>
                 </select>
                 <button id="startButton">Iniciar</button>
                 <button id="endButton" disabled>Finalizar</button>
@@ -52,6 +82,13 @@
         // Manejo de errores en la conexión WebSocket
         ws.addEventListener('error', (error) => {
             console.error('Error WebSocket:', error);
+            alert('No se pudo conectar al servidor MIDI. Asegúrate de que el servidor esté corriendo y el dispositivo MIDI esté seleccionado correctamente.');
+        });
+
+        // Manejo de cierre de la conexión WebSocket
+        ws.addEventListener('close', () => {
+            console.log('Conexión WebSocket cerrada');
+            alert('La conexión con el servidor MIDI se ha cerrado. Por favor, verifica el servidor y el dispositivo MIDI.');
         });
 
         // Manejo de mensajes recibidos del servidor
@@ -319,7 +356,7 @@
                 console.log(`Enviando CC ${ccNumber} con valor ${ccValue}`);
             }
             if (!isNaN(resonanceValue) && resonanceValue >= 0 && resonanceValue <= 127) {
-                const ccNumber = 42;
+                const ccNumber = 71; // Resonance (estándar MIDI)
                 const ccValue = Math.min(127, Math.max(0, resonanceValue));
                 const ccMessage = JSON.stringify({ ccNumber, ccValue });
                 if (isOpen(ws)) ws.send(ccMessage);
@@ -345,7 +382,7 @@
 
         // Envía cambio de programa (instrumento) a través de WebSocket
         function sendProgramChange(instrument) {
-            const pcMessage = JSON.stringify({ ccNumber: 192, ccValue: instrument, value: 0 });
+            const pcMessage = JSON.stringify({ ccNumber: 192, ccValue: parseInt(instrument) });
             if (isOpen(ws)) ws.send(pcMessage);
             console.log(`Enviando Cambio de Programa a instrumento ${instrument}`);
         }
